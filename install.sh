@@ -10,7 +10,7 @@ set -euo pipefail
 
 # --------- User-tunable defaults ----------
 # If SS_PORT is NOT provided, script tries 443 then falls back automatically
-SS_PORT="${SS_PORT:-}"                      # empty -> auto choose
+SS_PORT="${SS_PORT:-443}"
 SS_METHOD="${SS_METHOD:-auto}"              # auto -> detect
 SS_TIMEOUT="${SS_TIMEOUT:-300}"
 SS_FAST_OPEN="${SS_FAST_OPEN:-true}"        # TCP Fast Open (server side)
@@ -286,6 +286,12 @@ main() {
   echo -e "${C_CYAN}Shadowsocks auto-install for Ubuntu${C_RESET}"
   echo "------------------------------------"
 
+  start_spinner "0/7 Checking port 443 availability + selecting port..."
+  if port_is_listening "${SS_PORT}"; then
+    echo -e "\n${C_YELLOW}Warning:${C_RESET} Port ${SS_PORT} appears busy. Trying to pick a free port..."
+    SS_PORT="$(pick_free_port)"
+  fi
+  stop_spinner
   run_step_inline "0/7 Checking port 443 availability + selecting port..." select_server_port
 
   # Detect method if auto
