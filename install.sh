@@ -1,248 +1,325 @@
-```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===================== SETTINGS (override via env) =====================
-SS_PORT="${SS_PORT:-443}"
-SS_LOCAL_PORT=1080                    # client-side only (some clients require it)
-SS_METHOD="${SS_METHOD:-chacha20-ietf-poly1305}"
-SS_USER="${SS_USER:-shadowsocks}"
+########################################
+# Shadowsocks auto-install for Ubuntu
+# - Installs shadowsocks-libev
+# - Configures ss-server
+# - Generates 10-char password (letters+digits)
+# - Generates ss:// link
+# - Opens UFW: 22/tcp + SS port tcp/udp
+# - Enables ip_forward=1
+# - Applies TCP/UDP optimizations (BBR/fq when available)
+# - Prints summary
+# - Generates OPTIONAL ss-local config with local_port=1080
+#   and creates OPTIONAL ss-local systemd service (disabled by default)
+#
+# Usage:
+#   sudo bash install_shadowsocks.sh
+#
+# Optional env overrides:
+#   SS_PORT=8388 SS_METHOD=aes-256-gcm SS_PASSWORD=... SS_HOST=... SS_TAG="My Server"
+########################################
 
-SS_CONFIG_DIR="/etc/shadowsocks-libev"
-SS_CONFIG_FILE="${SS_CONFIG_DIR}/config.json"
+LOG_PREFIX="[shadowsocks-installer]"
+SS_CONFIG="/etc/shadowsocks-libev/config.json"
+SS_LOCAL_CONFIG="/etc/shadowsocks-libev/local.json"
+SYSCTL_FILE="/etc/sysctl.d/99-shadowsocks-optimizations.conf"
 
-# Use a UNIQUE service name to avoid conflicts with distro scripts
-SS_SERVICE_NAME="ss-server-custom"
+DEFAULT_PORT="443"
+DEFAULT_METHOD="chacha20-ietf-poly1305"
+DEFAULT_LOCAL_PORT="1080"
 
-SYSCTL_FILE="/etc/sysctl.d/99-shadowsocks.conf"
-ENABLE_NAT="${ENABLE_NAT:-0}"         # set to 1 to enable iptables MASQUERADE
-# ======================================================================
+info()  { echo -e "${LOG_PREFIX} [INFO] $*"; }
+warn()  { echo -e "${LOG_PREFIX} [WARN] $*" >&2; }
+err()   { echo -e "${LOG_PREFIX} [ERROR] $*" >&2; }
+die()   { err "$*"; exit 1; }
 
-die()  { echo "ERROR: $*" >&2; exit 1; }
-log()  { echo "[install] $*"; }
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# 10-char password (letters+digits only)
-generate_password() {
+need_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    die "Please run as root: sudo bash $0"
+  fi
+}
+
+# 3) Generate password consisting of 10 digits and letters
+gen_password() {
   tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10
 }
 
-# Generate password if not provided
-SS_PASSWORD="${SS_PASSWORD:-$(generate_password)}"
-
-need_root() { [[ $EUID -eq 0 ]] || die "Run as root (sudo)."; }
-
-detect_ubuntu() {
-  [[ -r /etc/os-release ]] || die "Cannot detect OS."
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  [[ "${ID:-}" == "ubuntu" ]] || die "Ubuntu only."
+get_public_ip() {
+  local ip=""
+  if has_cmd curl; then
+    ip="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ -z "${ip}" ]] && has_cmd wget; then
+    ip="$(wget -qO- --timeout=4 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  echo "${ip}"
 }
 
-validate_settings() {
-  [[ "$SS_PORT" =~ ^[0-9]+$ ]] || die "SS_PORT must be numeric."
-  (( SS_PORT >= 1 && SS_PORT <= 65535 )) || die "SS_PORT must be 1..65535."
-  [[ -n "$SS_PASSWORD" ]] || die "SS_PASSWORD empty."
-  [[ -n "$SS_METHOD" ]] || die "SS_METHOD empty."
-}
-
-install_deps() {
-  log "Installing dependencies..."
+install_dependencies() {
+  info "Updating apt and installing dependencies..."
   apt-get update -y
   apt-get install -y --no-install-recommends \
-    ca-certificates curl ufw openssl software-properties-common jq iproute2
+    shadowsocks-libev \
+    ufw \
+    ca-certificates \
+    curl \
+    jq
 }
 
-install_shadowsocks() {
-  log "Installing shadowsocks-libev..."
-  if ! apt-cache show shadowsocks-libev >/dev/null 2>&1; then
-    add-apt-repository -y ppa:max-c-lv/shadowsocks-libev
-    apt-get update -y
-  fi
-  apt-get install -y shadowsocks-libev
+# 1) Ufw port open for UDP and TCP of shadowsocks server including 22 port
+configure_ufw() {
+  local ss_port="$1"
+
+  info "Configuring UFW (allow 22/tcp and ${ss_port}/tcp+udp)..."
+  ufw --force enable >/dev/null
+
+  ufw allow 22/tcp >/dev/null || true
+  ufw allow "${ss_port}"/tcp >/dev/null || true
+  ufw allow "${ss_port}"/udp >/dev/null || true
+
+  info "UFW status:"
+  ufw status verbose || true
 }
 
-create_user() {
-  if ! id -u "$SS_USER" >/dev/null 2>&1; then
-    log "Creating system user: ${SS_USER}"
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$SS_USER"
-  fi
-}
+# 5) Applications setting including restart of shadowsocks service
+write_server_config() {
+  local ss_port="$1"
+  local ss_password="$2"
+  local ss_method="$3"
 
-read_existing_port_if_any() {
-  [[ -f "$SS_CONFIG_FILE" ]] && jq -r '.server_port // empty' "$SS_CONFIG_FILE" 2>/dev/null || true
-}
+  info "Writing ss-server config to ${SS_CONFIG} ..."
+  mkdir -p "$(dirname "${SS_CONFIG}")"
 
-write_config() {
-  log "Writing server config to ${SS_CONFIG_FILE}"
-  mkdir -p "$SS_CONFIG_DIR"
-  cat > "$SS_CONFIG_FILE" <<EOF
+  # NOTE: local_address removed as requested
+  # 6) local_port is kept at 1080
+  cat > "${SS_CONFIG}" <<EOF
 {
-  "server": ["0.0.0.0", "::0"],
-  "server_port": ${SS_PORT},
-  "password": "${SS_PASSWORD}",
-  "method": "${SS_METHOD}",
+  "server":"0.0.0.0",
+  "server_port": ${ss_port},
+  "local_port": ${DEFAULT_LOCAL_PORT},
+  "password":"${ss_password}",
   "timeout": 300,
-  "mode": "tcp_and_udp",
-  "fast_open": true
+  "method":"${ss_method}",
+  "mode":"tcp_and_udp",
+  "fast_open": false,
+  "reuse_port": true,
+  "no_delay": true
 }
 EOF
-
-  # Allow the service user to read the config
-  chown -R "${SS_USER}:${SS_USER}" "$SS_CONFIG_DIR"
-  chmod 750 "$SS_CONFIG_DIR"
-  chmod 640 "$SS_CONFIG_FILE"
 }
 
-write_systemd() {
-  log "Installing systemd service: ${SS_SERVICE_NAME}.service"
-  cat > "/etc/systemd/system/${SS_SERVICE_NAME}.service" <<EOF
+# Optional client config (ss-local), also without local_address
+write_local_client_config() {
+  local server_host="$1"
+  local ss_port="$2"
+  local ss_password="$3"
+  local ss_method="$4"
+
+  info "Writing OPTIONAL ss-local (client) config to ${SS_LOCAL_CONFIG} (local_port=${DEFAULT_LOCAL_PORT}) ..."
+  cat > "${SS_LOCAL_CONFIG}" <<EOF
+{
+  "server":"${server_host}",
+  "server_port": ${ss_port},
+  "local_port": ${DEFAULT_LOCAL_PORT},
+  "password":"${ss_password}",
+  "timeout": 300,
+  "method":"${ss_method}",
+  "mode":"tcp_and_udp"
+}
+EOF
+}
+
+enable_and_restart_service() {
+  info "Enabling and restarting shadowsocks-libev service..."
+  systemctl daemon-reload
+  systemctl enable shadowsocks-libev >/dev/null || true
+  systemctl restart shadowsocks-libev
+
+  sleep 1
+  if ! systemctl is-active --quiet shadowsocks-libev; then
+    err "Service is NOT running."
+    err "Recent logs:"
+    journalctl -u shadowsocks-libev -n 120 --no-pager || true
+    die "Fix the error above and re-run."
+  fi
+
+  info "Service is running."
+}
+
+# 7) Add ip.forwarding = 1
+# 8) Optimization of TCP and UDP connection to improve speed and latency
+apply_network_optimizations() {
+  info "Applying sysctl optimizations + enabling IP forwarding..."
+
+  cat > "${SYSCTL_FILE}" <<'EOF'
+# Shadowsocks performance tuning (safe-ish defaults)
+
+# Enable routing/forwarding
+net.ipv4.ip_forward = 1
+
+# Basic security/sanity
+net.ipv4.tcp_syncookies = 1
+
+# Queue / congestion control (best on modern kernels)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# TCP improvements
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_mtu_probing = 1
+
+# Buffers
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+# Backlog
+net.core.netdev_max_backlog = 250000
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192
+
+# Wider ephemeral ports
+net.ipv4.ip_local_port_range = 10240 65535
+EOF
+
+  if ! sysctl --system >/dev/null 2>&1; then
+    warn "Some sysctl values may not be supported by your kernel. Details:"
+    sysctl --system || true
+  fi
+
+  local cc qdisc
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+  info "Applied: ip_forward=$(sysctl -n net.ipv4.ip_forward), congestion_control=${cc}, qdisc=${qdisc}"
+}
+
+# 2) Shadowsocks link generator
+# ss://BASE64(method:password@host:port)#TAG
+ss_link() {
+  local method="$1"
+  local password="$2"
+  local host="$3"
+  local port="$4"
+  local tag="$5"
+
+  local userinfo="${method}:${password}@${host}:${port}"
+  local b64=""
+
+  if has_cmd openssl; then
+    b64="$(printf '%s' "${userinfo}" | openssl base64 -A)"
+  else
+    b64="$(printf '%s' "${userinfo}" | base64 | tr -d '\n')"
+  fi
+
+  tag="${tag// /%20}"
+  printf "ss://%s#%s\n" "${b64}" "${tag}"
+}
+
+create_optional_ss_local_service() {
+  info "Creating OPTIONAL ss-local systemd service (disabled by default)..."
+  cat > /etc/systemd/system/ss-local.service <<EOF
 [Unit]
-Description=Shadowsocks Server (custom)
+Description=Shadowsocks Local Client (ss-local)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=${SS_USER}
-Group=${SS_USER}
-ExecStart=/usr/bin/ss-server -c ${SS_CONFIG_FILE} -u
+ExecStart=/usr/bin/ss-local -c ${SS_LOCAL_CONFIG} -u
 Restart=on-failure
 RestartSec=2
-LimitNOFILE=1048576
-
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${SS_CONFIG_DIR}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable --now "${SS_SERVICE_NAME}.service"
+  info "ss-local service created. To enable it: systemctl enable --now ss-local"
 }
 
-apply_sysctl() {
-  log "Applying sysctl tuning (BBR + ip_forward)..."
-  cat > "$SYSCTL_FILE" <<EOF
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.ip_forward=1
-EOF
-  sysctl --system >/dev/null || true
-}
-
-configure_firewall() {
-  local old_port="$1"
-
-  log "Configuring UFW (allow SSH 22 + SS port)..."
-  ufw allow 22/tcp >/dev/null
-  ufw allow "${SS_PORT}/tcp" >/dev/null
-  ufw allow "${SS_PORT}/udp" >/dev/null
-
-  if [[ -n "$old_port" && "$old_port" != "$SS_PORT" ]]; then
-    ufw delete allow "${old_port}/tcp" >/dev/null 2>&1 || true
-    ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
-  fi
-
-  ufw --force enable >/dev/null || true
-}
-
-setup_iptables_masquerade() {
-  [[ "$ENABLE_NAT" == "1" ]] || return 0
-  log "Enabling NAT (iptables MASQUERADE)..."
-
-  local wan_if
-  wan_if="$(ip route | awk '/^default/ {print $5; exit}')"
-  [[ -n "$wan_if" ]] || die "Cannot detect outbound interface."
-
-  apt-get install -y iptables-persistent >/dev/null
-  iptables -t nat -C POSTROUTING -o "$wan_if" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -o "$wan_if" -j MASQUERADE
-  iptables-save > /etc/iptables/rules.v4
-}
-
-get_public_ip() {
-  curl -fsS https://api.ipify.org || echo YOUR_SERVER_IP
-}
-
-generate_ss_human() {
-  echo "${SS_METHOD}:${SS_PASSWORD}@$(get_public_ip):${SS_PORT}"
-}
-
-# Keep base64 padding for compatibility
-generate_ss_link() {
-  echo "ss://$(printf '%s' "$(generate_ss_human)" | base64 | tr -d '\n')"
-}
-
-health_checks() {
-  log "Health checks..."
-  systemctl is-active --quiet "${SS_SERVICE_NAME}.service" || die "Service not running. Check: journalctl -u ${SS_SERVICE_NAME} -e --no-pager"
-
-  if ss -lntup | grep -q ":${SS_PORT}"; then
-    log "Listening OK on :${SS_PORT}"
-  else
-    die "Service active but port :${SS_PORT} not listening. Check conflicts: ss -lntup | grep ':${SS_PORT}'"
-  fi
-}
-
+# 4) Printing summary
 print_summary() {
-  local ip
-  ip="$(get_public_ip)"
+  local host="$1"
+  local ss_port="$2"
+  local ss_method="$3"
+  local ss_password="$4"
+  local link="$5"
+
   echo
-  echo "==================== DONE ===================="
-  echo "Server IP:    ${ip}"
-  echo "Server Port:  ${SS_PORT}"
-  echo "Method:       ${SS_METHOD}"
-  echo "Password:     ${SS_PASSWORD}"
-  echo "Service:      ${SS_SERVICE_NAME}.service"
+  echo "================== SUMMARY =================="
+  echo "Server Host/IP : ${host}"
+  echo "Server Port    : ${ss_port} (TCP+UDP)"
+  echo "Method         : ${ss_method}"
+  echo "Password       : ${ss_password}"
+  echo "Local Port     : ${DEFAULT_LOCAL_PORT} (client/local config)"
   echo
-  echo "Human-readable:"
-  echo "  $(generate_ss_human)"
+  echo "Shadowsocks URI:"
+  echo "${link}"
   echo
-  echo "ss:// link:"
-  echo "  $(generate_ss_link)"
+  echo "Config files:"
+  echo " - Server: ${SS_CONFIG}"
+  echo " - Local : ${SS_LOCAL_CONFIG} (optional client config)"
   echo
-  echo "Client JSON (includes local_port=1080 for strict clients):"
-  cat <<EOF
-{
-  "server": "${ip}",
-  "server_port": ${SS_PORT},
-  "local_port": ${SS_LOCAL_PORT},
-  "password": "${SS_PASSWORD}",
-  "method": "${SS_METHOD}"
-}
-EOF
+  echo "Commands:"
+  echo " - Status : systemctl status shadowsocks-libev --no-pager"
+  echo " - Logs   : journalctl -u shadowsocks-libev -n 200 --no-pager"
+  echo " - Restart: systemctl restart shadowsocks-libev"
+  echo "============================================="
   echo
-  echo "If next you want:"
-  echo "  NAT rules (iptables / nftables)"
-  echo "================================================"
 }
 
 main() {
   need_root
-  detect_ubuntu
-  validate_settings
 
-  install_deps
-  install_shadowsocks
-  create_user
+  local ss_port ss_method ss_password server_host tag link
 
-  local old_port
-  old_port="$(read_existing_port_if_any)"
+  ss_port="${SS_PORT:-${DEFAULT_PORT}}"
+  ss_method="${SS_METHOD:-${DEFAULT_METHOD}}"
+  ss_password="${SS_PASSWORD:-$(gen_password)}"
 
-  write_config
-  write_systemd
-  apply_sysctl
-  setup_iptables_masquerade
-  configure_firewall "$old_port"
+  server_host="${SS_HOST:-}"
+  if [[ -z "${server_host}" ]]; then
+    server_host="$(get_public_ip)"
+  fi
+  if [[ -z "${server_host}" ]]; then
+    server_host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [[ -z "${server_host}" ]]; then
+    server_host="$(hostname)"
+  fi
 
-  systemctl restart "${SS_SERVICE_NAME}.service"
-  health_checks
-  print_summary
+  tag="${SS_TAG:-Shadowsocks}"
+
+  info "Starting installation with: port=${ss_port}, method=${ss_method}, host=${server_host}, local_port=${DEFAULT_LOCAL_PORT}"
+
+  install_dependencies
+  configure_ufw "${ss_port}"
+
+  write_server_config "${ss_port}" "${ss_password}" "${ss_method}"
+  write_local_client_config "${server_host}" "${ss_port}" "${ss_password}" "${ss_method}"
+
+  apply_network_optimizations
+
+  enable_and_restart_service
+  create_optional_ss_local_service
+
+  link="$(ss_link "${ss_method}" "${ss_password}" "${server_host}" "${ss_port}" "${tag}")"
+  print_summary "${server_host}" "${ss_port}" "${ss_method}" "${ss_password}" "${link}"
+
+  info "Done."
 }
 
 main "$@"
-```
