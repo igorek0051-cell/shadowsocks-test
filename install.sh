@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 # =========================
 # Shadowsocks auto-installer (Ubuntu)
@@ -170,7 +170,9 @@ write_ss_config() {
   "timeout": 60,
   "method": "${method}",
   "mode": "tcp_and_udp",
-  "fast_open": true
+  "fast_open": true,
+  "reuse_port": true,
+  "no_delay": true
 }
 EOF
 
@@ -265,7 +267,3 @@ log "Useful commands:"
 echo "  systemctl status shadowsocks-libev --no-pager"
 echo "  journalctl -u shadowsocks-libev -e --no-pager"
 echo "  ufw status verbose"
-
-
-main "$@"
-
