@@ -5,9 +5,12 @@ set -euo pipefail
 # Shadowsocks-libev Auto Installer (Ubuntu)
 #############################################
 
+# -------- REQUIRED USER INPUT --------
+: "${SS_PASSWORD:?ERROR: You must set SS_PASSWORD}"
+
 # -------- User config (env override allowed) --------
 SS_PORT="${SS_PORT:-}"                   # empty = auto (443 -> fallback)
-SS_METHOD="${SS_METHOD:-aes-256-gcm}"    # FIXED method (no auto-detect)
+SS_METHOD="${SS_METHOD:-aes-256-gcm}"
 SS_MODE="${SS_MODE:-tcp_and_udp}"
 SS_TIMEOUT="${SS_TIMEOUT:-300}"
 SS_FAST_OPEN="${SS_FAST_OPEN:-true}"
@@ -62,10 +65,6 @@ run_step() {
 # -------- Helpers --------
 require_root() {
   [[ $EUID -eq 0 ]] || { echo "Run as root"; exit 1; }
-}
-
-rand_password_10() {
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10
 }
 
 get_public_ip() {
@@ -126,7 +125,7 @@ configure_shadowsocks() {
 {
   "server":["0.0.0.0","::0"],
   "server_port": $SS_PORT,
-  "password": "$1",
+  "password": "$SS_PASSWORD",
   "timeout": $SS_TIMEOUT,
   "method": "$SS_METHOD",
   "mode": "$SS_MODE",
@@ -160,22 +159,20 @@ main() {
 
   run_step "2/7 Installing shadowsocks-libev..." install_shadowsocks
 
-  PASSWORD="$(rand_password_10)"
-
   run_step "3/7 Applying TCP/UDP tuning..." apply_sysctl
-  run_step "4/7 Configuring Shadowsocks..." configure_shadowsocks "$PASSWORD"
+  run_step "4/7 Configuring Shadowsocks..." configure_shadowsocks
   run_step "5/7 Configuring firewall..." configure_ufw
   run_step "6/7 Verifying service..." verify
 
   IP="$(get_public_ip)"
-  LINK="$(gen_ss_link "$SS_METHOD" "$PASSWORD" "$IP" "$SS_PORT")"
+  LINK="$(gen_ss_link "$SS_METHOD" "$SS_PASSWORD" "$IP" "$SS_PORT")"
 
   echo
   echo "=========== SUMMARY ==========="
   echo "Server IP:    $IP"
   echo "Server Port:  $SS_PORT"
   echo "Method:       $SS_METHOD"
-  echo "Password:     $PASSWORD"
+  echo "Password:     (user-provided)"
   echo
   echo "Shadowsocks link:"
   echo "$LINK"
