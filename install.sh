@@ -74,6 +74,20 @@ run_step() {
   stop_spinner
 }
 
+run_step_inline() {
+  local title="$1"
+  shift
+  start_spinner "${title}"
+  "$@" >/tmp/ss_install.log 2>&1 || {
+    stop_spinner
+    echo -e "${C_RED}FAILED${C_RESET}: ${title}"
+    echo "---- Last 160 lines of log ----"
+    tail -n 160 /tmp/ss_install.log || true
+    exit 1
+  }
+  stop_spinner
+}
+
 # --------- Helpers ----------
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -269,7 +283,7 @@ main() {
   echo -e "${C_CYAN}Shadowsocks auto-install for Ubuntu${C_RESET}"
   echo "------------------------------------"
 
-  run_step "0/7 Checking port 443 availability + selecting port..." select_server_port
+  run_step_inline "0/7 Checking port 443 availability + selecting port..." select_server_port
 
   # Detect method if auto
   if [[ "${SS_METHOD}" == "auto" ]]; then
