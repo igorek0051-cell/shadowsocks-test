@@ -170,7 +170,7 @@ write_ss_config() {
   "timeout": 60,
   "method": "${method}",
   "mode": "tcp_and_udp",
-  "fast_open": true,
+  "fast_open": true
 }
 EOF
 
