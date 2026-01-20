@@ -171,8 +171,6 @@ write_ss_config() {
   "method": "${method}",
   "mode": "tcp_and_udp",
   "fast_open": true,
-  "reuse_port": true,
-  "no_delay": true
 }
 EOF
 
