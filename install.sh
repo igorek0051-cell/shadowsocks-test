@@ -280,7 +280,7 @@ install_packages
 progress "Generating secure password (10 chars letters+digits)..."
 SS_PASSWORD="$(random_password_10)"
 
-progress "Auto-detecting best supported encryption method..."
+log "Auto-detecting best supported encryption method..."
 SS_METHOD="$(pick_best_cipher)"
 log "Selected method: ${SS_METHOD}"
 
