@@ -269,9 +269,7 @@ main() {
   echo -e "${C_CYAN}Shadowsocks auto-install for Ubuntu${C_RESET}"
   echo "------------------------------------"
 
-  start_spinner "0/7 Checking port 443 availability + selecting port..."
-  select_server_port
-  stop_spinner
+  run_step "0/7 Checking port 443 availability + selecting port..." select_server_port
 
   # Detect method if auto
   if [[ "${SS_METHOD}" == "auto" ]]; then
