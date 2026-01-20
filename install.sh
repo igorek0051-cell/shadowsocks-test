@@ -163,6 +163,24 @@ pick_free_port() {
   exit 1
 }
 
+select_server_port() {
+  # If SS_PORT empty -> prefer 443, else fallback to free port
+  if [[ -z "${SS_PORT}" ]]; then
+    if port_is_listening 443; then
+      SS_PORT="$(pick_free_port)"
+    else
+      SS_PORT="443"
+    fi
+    return 0
+  fi
+
+  # If user explicitly sets SS_PORT, keep it but warn if busy
+  if port_is_listening "${SS_PORT}"; then
+    echo -e "${C_YELLOW}Warning:${C_RESET} Port ${SS_PORT} appears busy. Trying to pick a free port..."
+    SS_PORT="$(pick_free_port)"
+  fi
+}
+
 # --------- Steps ----------
 install_packages() {
   apt-get update -y
@@ -251,25 +269,7 @@ main() {
   echo -e "${C_CYAN}Shadowsocks auto-install for Ubuntu${C_RESET}"
   echo "------------------------------------"
 
-  # Choose port if not specified
-  if [[ -z "${SS_PORT}" ]]; then
-    run_step "0/7 Checking port 443 availability + selecting port..." bash -c '
-      :
-    '
-    # (No-op step above just to keep consistent progress UI)
-    if port_is_listening 443; then
-      # auto fallback
-      SS_PORT="$(pick_free_port)"
-    else
-      SS_PORT="443"
-    fi
-  else
-    # If user explicitly sets SS_PORT, we keep it but warn if busy
-    if port_is_listening "${SS_PORT}"; then
-      echo -e "${C_YELLOW}Warning:${C_RESET} Port ${SS_PORT} appears busy. Trying to pick a free port..."
-      SS_PORT="$(pick_free_port)"
-    fi
-  fi
+  run_step "0/7 Checking port 443 availability + selecting port..." select_server_port
 
   # Detect method if auto
   if [[ "${SS_METHOD}" == "auto" ]]; then
