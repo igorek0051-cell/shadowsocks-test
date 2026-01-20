@@ -26,7 +26,7 @@ detect_ubuntu() {
 install_deps() {
   apt-get update -y
   apt-get install -y --no-install-recommends \
-    ca-certificates curl ufw openssl software-properties-common
+    ca-certificates curl ufw openssl software-properties-common jq
 }
 
 install_shadowsocks() {
@@ -40,6 +40,21 @@ install_shadowsocks() {
 create_user() {
   if ! id -u "$SS_USER" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SS_USER"
+  fi
+}
+
+validate_settings() {
+  [[ "$SS_PORT" =~ ^[0-9]+$ ]] || die "SS_PORT must be a number."
+  (( SS_PORT >= 1 && SS_PORT <= 65535 )) || die "SS_PORT must be 1..65535."
+
+  [[ -n "${SS_PASSWORD}" ]] || die "SS_PASSWORD must not be empty."
+  [[ -n "${SS_METHOD}" ]] || die "SS_METHOD must not be empty."
+}
+
+read_existing_port_if_any() {
+  # Returns existing server_port from config.json if present, else empty
+  if [[ -f "$SS_CONFIG_FILE" ]]; then
+    jq -r '.server_port // empty' "$SS_CONFIG_FILE" 2>/dev/null || true
   fi
 }
 
@@ -90,6 +105,10 @@ EOF
   systemctl enable --now "${SS_SERVICE_NAME}.service"
 }
 
+restart_service() {
+  systemctl restart "${SS_SERVICE_NAME}.service"
+}
+
 apply_sysctl() {
   cat > "$SYSCTL_FILE" <<EOF
 net.core.default_qdisc=fq
@@ -99,16 +118,41 @@ EOF
   sysctl --system >/dev/null || true
 }
 
-configure_firewall() {
-  # IMPORTANT: allow SSH first
+configure_firewall_open_ports() {
+  local old_port="${1:-}"
+
+  # IMPORTANT: allow SSH first (avoid lockout)
   ufw allow 22/tcp >/dev/null
 
-  # Shadowsocks ports
+  # Open Shadowsocks new port (TCP+UDP)
   ufw allow "${SS_PORT}/tcp" >/dev/null
   ufw allow "${SS_PORT}/udp" >/dev/null
 
+  # Optionally remove old port rules if old_port is known and different
+  if [[ -n "$old_port" && "$old_port" != "$SS_PORT" ]]; then
+    # Deleting might fail if rules don't exist; ignore errors
+    ufw delete allow "${old_port}/tcp" >/dev/null 2>&1 || true
+    ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
+  fi
+
   ufw --force enable >/dev/null || true
 }
+
+# --- NEW: Settings application function (idempotent) ---
+apply_settings() {
+  echo "[SETTINGS] Applying Shadowsocks settings..."
+  validate_settings
+
+  local old_port
+  old_port="$(read_existing_port_if_any)"
+
+  write_config
+  restart_service
+  configure_firewall_open_ports "${old_port}"
+
+  echo "[SETTINGS] Applied. (old_port=${old_port:-<none>} new_port=${SS_PORT})"
+}
+# ------------------------------------------------------
 
 get_public_ip() {
   curl -fsS https://api.ipify.org || echo YOUR_SERVER_IP
@@ -119,6 +163,7 @@ generate_ss_human() {
 }
 
 generate_ss_link() {
+  # Standard ss:// link: base64(method:password@server:port)
   printf '%s' "$(generate_ss_human)" | base64 | tr -d '\n=' | sed 's/^/ss:\/\//'
 }
 
@@ -141,7 +186,7 @@ print_summary() {
   echo "🔓 Human-readable (server):"
   echo "  ${human}"
   echo
-  echo "📌 Client local port:"
+  echo "📌 Client local port (set in your Shadowsocks client):"
   echo "  ${SS_LOCAL_PORT}"
   echo
   echo "🔗 Import link (ss://):"
@@ -162,6 +207,7 @@ EOF
   echo "Useful checks:"
   echo "  systemctl status ${SS_SERVICE_NAME} --no-pager"
   echo "  journalctl -u ${SS_SERVICE_NAME} -e --no-pager"
+  echo "  ss -lntup | grep ${SS_PORT}"
   echo "  sysctl net.ipv4.ip_forward"
   echo
   echo "If next you want:"
@@ -176,10 +222,12 @@ main() {
   install_deps
   install_shadowsocks
   create_user
-  write_config
   write_systemd
   apply_sysctl
-  configure_firewall
+
+  # Apply settings (writes config, restarts service, updates firewall)
+  apply_settings
+
   print_summary
 }
 
