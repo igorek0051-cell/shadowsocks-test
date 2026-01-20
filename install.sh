@@ -10,7 +10,7 @@ set -euo pipefail
 
 # --------- User-tunable defaults ----------
 # If SS_PORT is NOT provided, script tries 443 then falls back automatically
-SS_PORT="${SS_PORT:-}"                      # empty -> auto choose
+SS_PORT="${SS_PORT:-443}"
 SS_METHOD="${SS_METHOD:-auto}"              # auto -> detect
 SS_TIMEOUT="${SS_TIMEOUT:-300}"
 SS_FAST_OPEN="${SS_FAST_OPEN:-true}"        # TCP Fast Open (server side)
@@ -136,6 +136,9 @@ detect_best_method() {
 port_is_listening() {
   local port="$1"
   # If any process already listening on TCP or UDP port
+  if ! command -v ss >/dev/null 2>&1; then
+    return 1
+  fi
   ss -lntu 2>/dev/null | awk '{print $5}' | grep -E "[:.]${port}$" -q
 }
 
@@ -251,25 +254,12 @@ main() {
   echo -e "${C_CYAN}Shadowsocks auto-install for Ubuntu${C_RESET}"
   echo "------------------------------------"
 
-  # Choose port if not specified
-  if [[ -z "${SS_PORT}" ]]; then
-    run_step "0/7 Checking port 443 availability + selecting port..." bash -c '
-      :
-    '
-    # (No-op step above just to keep consistent progress UI)
-    if port_is_listening 443; then
-      # auto fallback
-      SS_PORT="$(pick_free_port)"
-    else
-      SS_PORT="443"
-    fi
-  else
-    # If user explicitly sets SS_PORT, we keep it but warn if busy
-    if port_is_listening "${SS_PORT}"; then
-      echo -e "${C_YELLOW}Warning:${C_RESET} Port ${SS_PORT} appears busy. Trying to pick a free port..."
-      SS_PORT="$(pick_free_port)"
-    fi
+  start_spinner "0/7 Checking port 443 availability + selecting port..."
+  if port_is_listening "${SS_PORT}"; then
+    echo -e "\n${C_YELLOW}Warning:${C_RESET} Port ${SS_PORT} appears busy. Trying to pick a free port..."
+    SS_PORT="$(pick_free_port)"
   fi
+  stop_spinner
 
   # Detect method if auto
   if [[ "${SS_METHOD}" == "auto" ]]; then
