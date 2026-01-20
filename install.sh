@@ -277,17 +277,12 @@ SS_NAME="${SS_NAME:-Shadowsocks}"
 progress "Installing required packages (shadowsocks-libev, curl, certs)..."
 install_packages
 
-run_step "Installing packages..." install_packages
-log "Auto-detecting best supported encryption method..."
+progress "Auto-detecting best supported encryption method..."
 SS_METHOD="$(pick_best_cipher)"
-log "Selected method: ${SS_METHOD}"
+
 
 progress "Generating secure password (10 chars letters+digits)..."
 SS_PASSWORD="$(random_password_10)"
-
-log "Auto-detecting best supported encryption method..."
-SS_METHOD="$(pick_best_cipher)"
-log "Selected method: ${SS_METHOD}"
 
 progress "Applying sysctl TCP/UDP optimizations + enabling ip.forwarding=1..."
 configure_sysctl_optimizations
