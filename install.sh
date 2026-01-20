@@ -78,8 +78,11 @@ write_config() {
   "fast_open": true
 }
 EOF
-  chmod 600 "$SS_CONFIG_FILE"
-  chown -R root:root "$SS_CONFIG_DIR"
+
+  # ✅ FIX: allow the service user to read the config
+  chown -R "${SS_USER}:${SS_USER}" "$SS_CONFIG_DIR"
+  chmod 750 "$SS_CONFIG_DIR"
+  chmod 640 "$SS_CONFIG_FILE"
 }
 
 write_systemd() {
@@ -161,8 +164,8 @@ generate_ss_human() {
   echo "${SS_METHOD}:${SS_PASSWORD}@$(get_public_ip):${SS_PORT}"
 }
 
+# keep base64 padding for compatibility
 generate_ss_link() {
-  # keep padding for compatibility
   echo "ss://$(printf '%s' "$(generate_ss_human)" | base64 | tr -d '\n')"
 }
 
@@ -173,7 +176,7 @@ health_checks() {
   if ss -lntup | grep -q ":${SS_PORT}"; then
     log "Listening OK on :${SS_PORT}"
   else
-    die "Service is active but port :${SS_PORT} not listening. Check conflicts: ss -lntup | grep ':${SS_PORT}' and logs."
+    die "Service active but port :${SS_PORT} not listening. Check conflicts: ss -lntup | grep ':${SS_PORT}'"
   fi
 }
 
@@ -224,6 +227,10 @@ main() {
   apply_sysctl
   setup_iptables_masquerade
   configure_firewall "$old_port"
+
+  # restart to ensure new config + perms are applied
+  systemctl restart "${SS_SERVICE_NAME}.service"
+
   health_checks
   print_summary
 }
