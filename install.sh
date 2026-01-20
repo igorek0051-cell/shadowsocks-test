@@ -292,7 +292,7 @@ main() {
 
   local password
   password="$(rand_password_10)"
-
+  ${SS_PORT} = '430'
   run_step "1/7 Installing packages (shadowsocks-libev, ufw, curl)..." install_packages
   run_step "2/7 Applying TCP/UDP optimizations + enabling IP forwarding..." apply_sysctl_tuning
   run_step "3/7 Configuring Shadowsocks server + restarting service..." configure_shadowsocks "${password}"
