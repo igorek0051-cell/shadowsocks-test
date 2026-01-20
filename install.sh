@@ -74,6 +74,20 @@ run_step() {
   stop_spinner
 }
 
+run_step_inline() {
+  local title="$1"
+  shift
+  start_spinner "${title}"
+  "$@" >/tmp/ss_install.log 2>&1 || {
+    stop_spinner
+    echo -e "${C_RED}FAILED${C_RESET}: ${title}"
+    echo "---- Last 160 lines of log ----"
+    tail -n 160 /tmp/ss_install.log || true
+    exit 1
+  }
+  stop_spinner
+}
+
 # --------- Helpers ----------
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -164,6 +178,24 @@ pick_free_port() {
 
   echo -e "${C_RED}ERROR:${C_RESET} Could not find a free port."
   exit 1
+}
+
+select_server_port() {
+  # If SS_PORT empty -> prefer 443, else fallback to free port
+  if [[ -z "${SS_PORT}" ]]; then
+    if port_is_listening 443; then
+      SS_PORT="$(pick_free_port)"
+    else
+      SS_PORT="443"
+    fi
+    return 0
+  fi
+
+  # If user explicitly sets SS_PORT, keep it but warn if busy
+  if port_is_listening "${SS_PORT}"; then
+    echo -e "${C_YELLOW}Warning:${C_RESET} Port ${SS_PORT} appears busy. Trying to pick a free port..."
+    SS_PORT="$(pick_free_port)"
+  fi
 }
 
 # --------- Steps ----------
@@ -260,6 +292,7 @@ main() {
     SS_PORT="$(pick_free_port)"
   fi
   stop_spinner
+  run_step_inline "0/7 Checking port 443 availability + selecting port..." select_server_port
 
   # Detect method if auto
   if [[ "${SS_METHOD}" == "auto" ]]; then
@@ -268,7 +301,7 @@ main() {
 
   local password
   password="$(rand_password_10)"
-
+  ${SS_PORT} = '430'
   run_step "1/7 Installing packages (shadowsocks-libev, ufw, curl)..." install_packages
   run_step "2/7 Applying TCP/UDP optimizations + enabling IP forwarding..." apply_sysctl_tuning
   run_step "3/7 Configuring Shadowsocks server + restarting service..." configure_shadowsocks "${password}"
