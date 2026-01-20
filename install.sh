@@ -150,6 +150,9 @@ detect_best_method() {
 port_is_listening() {
   local port="$1"
   # If any process already listening on TCP or UDP port
+  if ! command -v ss >/dev/null 2>&1; then
+    return 1
+  fi
   ss -lntu 2>/dev/null | awk '{print $5}' | grep -E "[:.]${port}$" -q
 }
 
