@@ -54,33 +54,7 @@ detect_public_ip() {
   echo "${ip:-YOUR_SERVER_IP}"
 }
 
-pick_best_cipher() {
-  # Prefer modern AEAD ciphers; choose first supported by this ss-server build.
-  local preferred=(
-    "chacha20-ietf-poly1305"
-    "xchacha20-ietf-poly1305"
-    "aes-256-gcm"
-    "aes-128-gcm"
-    "chacha20-poly1305"
-    "aes-256-cfb"
-    "aes-128-cfb"
-  )
 
-  local help_out=""
-  help_out="$(ss-server -h 2>&1 || true)"
-
-  for c in "${preferred[@]}"; do
-    if echo "$help_out" | tr ',' '\n' | grep -qiE "(^|[[:space:]])${c}([[:space:]]|$)"; then
-      echo "$c"
-      return 0
-    fi
-  done
-
-  # Fallback: try to extract any cipher-looking tokens from help output
-  local fallback=""
-  fallback="$(echo "$help_out" | tr ',' '\n' | grep -E '^[a-z0-9-]+$' | head -n 1 || true)"
-  echo "${fallback:-aes-256-gcm}"
-}
 
 configure_sysctl_optimizations() {
   # TCP/UDP speed/latency tuning; safe-ish defaults for VPS.
@@ -214,6 +188,84 @@ ss_link() {
   b64="$(printf '%s' "$raw" | base64 | tr -d '=' | tr '+/' '-_' | tr -d '\n')"
   printf 'ss://%s#%s\n' "$b64" "$(printf '%s' "$name" | sed 's/ /%20/g')"
 }
+
+
+
+
+
+
+
+log() { echo -e "[INFO] $*"; }
+warn() { echo -e "[WARN] $*"; }
+die() { echo -e "[ERROR] $*" >&2; exit 1; }
+
+have_aesni() {
+  # AES-NI on x86/x86_64
+  [[ -r /proc/cpuinfo ]] && grep -qiE '(^flags|Features).*\\baes\\b' /proc/cpuinfo
+}
+
+supported_methods() {
+  # Extract supported ciphers from ss-server output (fast, no hang)
+  # Works on most shadowsocks-libev builds.
+  command -v ss-server >/dev/null 2>&1 || return 1
+
+  # Try common help outputs; take the first that yields something
+  local out=""
+  out="$(ss-server -h 2>/dev/null || true)"
+  if [[ -z "$out" ]]; then
+    out="$(ss-server --help 2>/dev/null || true)"
+  fi
+
+  # Parse methods from help text: look for lines containing common ciphers.
+  # If parsing fails, return empty (caller will fallback).
+  echo "$out" | tr ' ' '\n' | tr ',' '\n' | tr -d '\r' \
+    | grep -E '^(aes-(128|192|256)-(gcm|cfb|ctr)|chacha20-ietf-poly1305|chacha20-poly1305|xchacha20-ietf-poly1305|2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)$' \
+    | sort -u
+}
+
+pick_best_cipher() {
+  # If user already set a specific method, keep it.
+  if [[ "${SS_METHOD:-auto}" != "auto" && -n "${SS_METHOD:-}" ]]; then
+    echo "${SS_METHOD}"
+    return 0
+  fi
+
+  local methods=""
+  methods="$(supported_methods || true)"
+
+  # Desired order depending on AES-NI
+  if have_aesni; then
+    # AES-NI present: prefer AES-GCM (fast on AES-NI)
+    local pref=( "aes-256-gcm" "aes-128-gcm" "chacha20-ietf-poly1305" "chacha20-poly1305" )
+    for m in "${pref[@]}"; do
+      if [[ -n "$methods" ]] && echo "$methods" | grep -qx "$m"; then
+        echo "$m"; return 0
+      fi
+    done
+    # If we couldn't parse methods, still choose a sane default
+    echo "aes-256-gcm"; return 0
+  else
+    # No AES-NI: prefer chacha20-ietf-poly1305
+    local pref=( "chacha20-ietf-poly1305" "chacha20-poly1305" "aes-128-gcm" "aes-256-gcm" )
+    for m in "${pref[@]}"; do
+      if [[ -n "$methods" ]] && echo "$methods" | grep -qx "$m"; then
+        echo "$m"; return 0
+      fi
+    done
+    echo "chacha20-ietf-poly1305"; return 0
+  fi
+}
+
+
+
+
+
+
+
+
+
+
+
 
 # -------- main --------
 require_root
