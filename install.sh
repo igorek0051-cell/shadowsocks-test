@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -31,7 +30,6 @@ install_deps() {
 }
 
 install_shadowsocks() {
-  # Try official repo first; fallback to PPA if package metadata not present.
   if ! apt-cache show shadowsocks-libev >/dev/null 2>&1; then
     add-apt-repository -y ppa:max-c-lv/shadowsocks-libev
     apt-get update -y
@@ -102,9 +100,14 @@ EOF
 }
 
 configure_firewall() {
-  ufw --force enable >/dev/null || true
+  # IMPORTANT: allow SSH first
+  ufw allow 22/tcp >/dev/null
+
+  # Shadowsocks ports
   ufw allow "${SS_PORT}/tcp" >/dev/null
   ufw allow "${SS_PORT}/udp" >/dev/null
+
+  ufw --force enable >/dev/null || true
 }
 
 get_public_ip() {
@@ -116,7 +119,6 @@ generate_ss_human() {
 }
 
 generate_ss_link() {
-  # Standard ss:// link: base64(method:password@server:port)
   printf '%s' "$(generate_ss_human)" | base64 | tr -d '\n=' | sed 's/^/ss:\/\//'
 }
 
@@ -139,7 +141,7 @@ print_summary() {
   echo "🔓 Human-readable (server):"
   echo "  ${human}"
   echo
-  echo "📌 Client local port (set in your Shadowsocks client):"
+  echo "📌 Client local port:"
   echo "  ${SS_LOCAL_PORT}"
   echo
   echo "🔗 Import link (ss://):"
@@ -160,7 +162,6 @@ EOF
   echo "Useful checks:"
   echo "  systemctl status ${SS_SERVICE_NAME} --no-pager"
   echo "  journalctl -u ${SS_SERVICE_NAME} -e --no-pager"
-  echo "  ss -lntup | grep ${SS_PORT}"
   echo "  sysctl net.ipv4.ip_forward"
   echo
   echo "If next you want:"
@@ -183,4 +184,3 @@ main() {
 }
 
 main "$@"
-```
