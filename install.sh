@@ -1,3 +1,4 @@
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -161,6 +162,9 @@ EOF
   echo "  journalctl -u ${SS_SERVICE_NAME} -e --no-pager"
   echo "  ss -lntup | grep ${SS_PORT}"
   echo "  sysctl net.ipv4.ip_forward"
+  echo
+  echo "If next you want:"
+  echo "  NAT rules (iptables / nftables)"
   echo "=========================================================="
 }
 
@@ -179,3 +183,4 @@ main() {
 }
 
 main "$@"
+```
