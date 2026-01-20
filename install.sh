@@ -1,10 +1,10 @@
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
 # ===================== SETTINGS (override via env) =====================
 SS_PORT="${SS_PORT:-443}"
 SS_LOCAL_PORT=1080                    # client-side only (some clients require it)
-SS_PASSWORD="${SS_PASSWORD:-$(openssl rand -base64 18 | tr -d '\n')}"
 SS_METHOD="${SS_METHOD:-chacha20-ietf-poly1305}"
 SS_USER="${SS_USER:-shadowsocks}"
 
@@ -20,6 +20,14 @@ ENABLE_NAT="${ENABLE_NAT:-0}"         # set to 1 to enable iptables MASQUERADE
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
 log()  { echo "[install] $*"; }
+
+# 10-char password (letters+digits only)
+generate_password() {
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10
+}
+
+# Generate password if not provided
+SS_PASSWORD="${SS_PASSWORD:-$(generate_password)}"
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root (sudo)."; }
 
@@ -79,7 +87,7 @@ write_config() {
 }
 EOF
 
-  # ✅ FIX: allow the service user to read the config
+  # Allow the service user to read the config
   chown -R "${SS_USER}:${SS_USER}" "$SS_CONFIG_DIR"
   chmod 750 "$SS_CONFIG_DIR"
   chmod 640 "$SS_CONFIG_FILE"
@@ -164,7 +172,7 @@ generate_ss_human() {
   echo "${SS_METHOD}:${SS_PASSWORD}@$(get_public_ip):${SS_PORT}"
 }
 
-# keep base64 padding for compatibility
+# Keep base64 padding for compatibility
 generate_ss_link() {
   echo "ss://$(printf '%s' "$(generate_ss_human)" | base64 | tr -d '\n')"
 }
@@ -207,6 +215,9 @@ print_summary() {
   "method": "${SS_METHOD}"
 }
 EOF
+  echo
+  echo "If next you want:"
+  echo "  NAT rules (iptables / nftables)"
   echo "================================================"
 }
 
@@ -228,11 +239,10 @@ main() {
   setup_iptables_masquerade
   configure_firewall "$old_port"
 
-  # restart to ensure new config + perms are applied
   systemctl restart "${SS_SERVICE_NAME}.service"
-
   health_checks
   print_summary
 }
 
 main "$@"
+```
