@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 # =========================
 # Shadowsocks auto-installer (Ubuntu)
@@ -268,7 +268,6 @@ echo "  systemctl status shadowsocks-libev --no-pager"
 echo "  journalctl -u shadowsocks-libev -e --no-pager"
 echo "  ufw status verbose"
 
-}
 
 main "$@"
 
