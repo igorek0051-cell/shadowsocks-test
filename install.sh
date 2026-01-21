@@ -255,3 +255,5 @@ echo "  systemctl status shadowsocks-libev --no-pager"
 echo "  systemctl cat shadowsocks-libev --no-pager"
 echo "  journalctl -u shadowsocks-libev -e --no-pager"
 echo "  ufw status verbose"
+
+echo "test 1"
