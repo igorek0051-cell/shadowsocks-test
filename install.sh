@@ -116,7 +116,7 @@ write_config() {
   "server": "0.0.0.0",
   "server_port": ${port},
   "password": "${password}",
-  "timeout": 60,
+  "timeout": 300,
   "method": "${method}",
   "mode": "tcp_and_udp",
   "fast_open": true,
