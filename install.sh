@@ -10,11 +10,13 @@ set -uo pipefail
 # - Config: DOES NOT include local_port/local_address
 # - Enables ip_forward=1
 # - TCP/UDP tuning (BBR if available, buffers, fq, etc.)
+# - Explicitly sets: echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+# - Adds rights to edit /etc/shadowsocks-libev and config.json
 # - Shows step-by-step progress
 # - Prints summary + ss:// link
 # ============================================================
 
-TOTAL_STEPS=10
+TOTAL_STEPS=11
 STEP=0
 
 info()  { printf "\033[1;32m[INFO]\033[0m %s\n" "$*"; }
@@ -51,7 +53,6 @@ detect_public_ip() {
 }
 
 pick_best_cipher() {
-  # Preference order: modern AEAD first
   local preferred=(
     "chacha20-ietf-poly1305"
     "xchacha20-ietf-poly1305"
@@ -60,24 +61,18 @@ pick_best_cipher() {
     "aes-256-cfb"
     "aes-128-cfb"
   )
-
   local h
   h="$(ss-server -h 2>&1 || true)"
-
-  # Robust-ish: look for exact token boundaries in help text
   for c in "${preferred[@]}"; do
     if echo "$h" | grep -qiE "(^|[^a-z0-9_-])${c}([^a-z0-9_-]|$)"; then
       echo "$c"
       return 0
     fi
   done
-
-  # Last-resort fallback
   echo "aes-256-gcm"
 }
 
 apply_sysctl_tuning() {
-  # Try to enable BBR if kernel supports it; otherwise keep default congestion control.
   modprobe tcp_bbr >/dev/null 2>&1 || true
 
   local cc="cubic"
@@ -90,14 +85,14 @@ apply_sysctl_tuning() {
   cat >/etc/sysctl.d/99-shadowsocks-tuning.conf <<EOF
 # --- Shadowsocks performance tuning ---
 
-# Enable IPv4 forwarding (requested)
+# Enable IPv4 forwarding
 net.ipv4.ip_forward=1
 
 # Queue discipline / congestion control
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=${cc}
 
-# TCP Fast Open
+# TCP Fast Open (also set via /proc below)
 net.ipv4.tcp_fastopen=3
 
 # Bigger buffers (TCP/UDP)
@@ -148,7 +143,6 @@ write_config() {
 
   mkdir -p /etc/shadowsocks-libev
 
-  # IMPORTANT: no local_port / local_address included
   cat >/etc/shadowsocks-libev/config.json <<EOF
 {
   "server": "0.0.0.0",
@@ -171,13 +165,36 @@ DAEMON_ARGS="-c ${CONFFILE}"
 EOF
 }
 
+add_edit_rights() {
+  # Make folder and file editable by a non-root user via group membership.
+  # By default, we grant access to the 'sudo' group (common on Ubuntu).
+  local grp="${SS_EDIT_GROUP:-sudo}"
+
+  if ! getent group "$grp" >/dev/null 2>&1; then
+    warn "Group '$grp' not found; falling back to 'root' only."
+    return 0
+  fi
+
+  chown -R root:"$grp" /etc/shadowsocks-libev
+  chmod 2775 /etc/shadowsocks-libev
+  chmod 0664 /etc/shadowsocks-libev/config.json
+
+  info "Edit rights: /etc/shadowsocks-libev owned by root:${grp}, dir=2775, config.json=664"
+  info "To allow a user to edit, add them to group '${grp}':  usermod -aG ${grp} <username>"
+}
+
+set_proc_tcp_fastopen() {
+  # Explicit requirement:
+  # echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+  # Use tee to avoid shell redirection issues under sudo contexts.
+  echo 3 | tee /proc/sys/net/ipv4/tcp_fastopen >/dev/null || true
+}
+
 configure_ufw() {
   local port="$1"
-
   ufw allow 22/tcp >/dev/null
   ufw allow "${port}"/tcp >/dev/null
   ufw allow "${port}"/udp >/dev/null
-
   if ! ufw status | grep -q "Status: active"; then
     yes | ufw enable >/dev/null || true
   fi
@@ -188,7 +205,6 @@ restart_service() {
   systemctl enable shadowsocks-libev >/dev/null 2>&1 || true
   systemctl restart shadowsocks-libev
   sleep 0.5
-
   if ! systemctl is-active --quiet shadowsocks-libev; then
     error "Service is not running. Logs:"
     echo "  journalctl -u shadowsocks-libev -e --no-pager"
@@ -197,10 +213,8 @@ restart_service() {
 }
 
 make_ss_link() {
-  # ss:// base64url(method:password@host:port)#name
   local method="$1" password="$2" host="$3" port="$4" name="$5"
   local raw="${method}:${password}@${host}:${port}"
-
   local b64
   b64="$(printf '%s' "$raw" | base64 -w0 | tr -d '=' | tr '+/' '-_')"
   printf 'ss://%s#%s\n' "$b64" "$(printf '%s' "$name" | sed 's/ /%20/g')"
@@ -226,8 +240,14 @@ progress "Applying TCP/UDP tuning + enabling ip_forward=1..."
 apply_sysctl_tuning
 apply_limits
 
+progress "Setting TCP Fast Open via /proc (echo 3 > /proc/sys/net/ipv4/tcp_fastopen)..."
+set_proc_tcp_fastopen
+
 progress "Writing Shadowsocks config (no local_port/local_address)..."
 write_config "$SS_PORT" "$SS_PASSWORD" "$SS_METHOD"
+
+progress "Adding edit rights on /etc/shadowsocks-libev and config.json..."
+add_edit_rights
 
 progress "Configuring UFW (22/tcp + ${SS_PORT}/tcp + ${SS_PORT}/udp)..."
 configure_ufw "$SS_PORT"
@@ -250,6 +270,7 @@ echo " Password    : ${SS_PASSWORD}"
 echo " Method      : ${SS_METHOD}"
 echo " Mode        : tcp_and_udp"
 echo " UFW         : allowed 22/tcp, ${SS_PORT}/tcp, ${SS_PORT}/udp"
+echo " Edit group  : ${SS_EDIT_GROUP:-sudo} (dir:2775, file:664)"
 echo
 echo " ss:// link  :"
 echo " ${SS_URI}"
@@ -259,3 +280,7 @@ info "Useful commands:"
 echo "  systemctl status shadowsocks-libev --no-pager"
 echo "  journalctl -u shadowsocks-libev -e --no-pager"
 echo "  ufw status verbose"
+echo
+info "To let a user edit config.json without sudo:"
+echo "  sudo usermod -aG ${SS_EDIT_GROUP:-sudo} <username>"
+echo "  # then re-login (or: newgrp ${SS_EDIT_GROUP:-sudo})"
