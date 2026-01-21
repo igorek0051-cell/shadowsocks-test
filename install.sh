@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
-# ============================================================
-# Shadowsocks auto-install script (Ubuntu)
-# - Installs shadowsocks-libev
-# - Opens UFW for 22/tcp + SS port (tcp+udp)
-# - Generates 10-char password (letters+digits)
-# - Auto-detects best supported encryption method
-# - Config: DOES NOT include local_port/local_address
-# - Enables ip_forward=1
-# - TCP/UDP tuning (BBR if available, buffers, fq, etc.)
-# - Explicitly sets: echo 3 > /proc/sys/net/ipv4/tcp_fastopen
-# - Adds rights to edit /etc/shadowsocks-libev and config.json
-# - Shows step-by-step progress
-# - Prints summary + ss:// link
-# ============================================================
-
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 STEP=0
 
 info()  { printf "\033[1;32m[INFO]\033[0m %s\n" "$*"; }
@@ -37,15 +22,11 @@ require_root() {
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-rand_password_10() {
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10
-}
+rand_password_10() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10; }
 
 detect_public_ip() {
   local ip=""
-  if need_cmd curl; then
-    ip="$(curl -4 -fsS https://api.ipify.org || true)"
-  fi
+  if need_cmd curl; then ip="$(curl -4 -fsS https://api.ipify.org || true)"; fi
   if [[ -z "$ip" ]]; then
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}' || true)"
   fi
@@ -65,8 +46,7 @@ pick_best_cipher() {
   h="$(ss-server -h 2>&1 || true)"
   for c in "${preferred[@]}"; do
     if echo "$h" | grep -qiE "(^|[^a-z0-9_-])${c}([^a-z0-9_-]|$)"; then
-      echo "$c"
-      return 0
+      echo "$c"; return 0
     fi
   done
   echo "aes-256-gcm"
@@ -83,19 +63,11 @@ apply_sysctl_tuning() {
   fi
 
   cat >/etc/sysctl.d/99-shadowsocks-tuning.conf <<EOF
-# --- Shadowsocks performance tuning ---
-
-# Enable IPv4 forwarding
 net.ipv4.ip_forward=1
-
-# Queue discipline / congestion control
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=${cc}
-
-# TCP Fast Open (also set via /proc below)
 net.ipv4.tcp_fastopen=3
 
-# Bigger buffers (TCP/UDP)
 net.core.rmem_max=134217728
 net.core.wmem_max=134217728
 net.core.rmem_default=262144
@@ -105,17 +77,14 @@ net.ipv4.tcp_wmem=4096 65536 134217728
 net.ipv4.udp_rmem_min=16384
 net.ipv4.udp_wmem_min=16384
 
-# Backlogs
 net.core.netdev_max_backlog=250000
 net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=8192
 
-# Keepalive
 net.ipv4.tcp_keepalive_time=600
 net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=10
 
-# Misc
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_fin_timeout=15
 EOF
@@ -142,7 +111,6 @@ write_config() {
   local port="$1" password="$2" method="$3"
 
   mkdir -p /etc/shadowsocks-libev
-
   cat >/etc/shadowsocks-libev/config.json <<EOF
 {
   "server": "0.0.0.0",
@@ -156,22 +124,13 @@ write_config() {
   "no_delay": true
 }
 EOF
-
-  cat >/etc/default/shadowsocks-libev <<'EOF'
-# Defaults for shadowsocks-libev
-START=yes
-CONFFILE=/etc/shadowsocks-libev/config.json
-DAEMON_ARGS="-c ${CONFFILE}"
-EOF
 }
 
 add_edit_rights() {
-  # Make folder and file editable by a non-root user via group membership.
-  # By default, we grant access to the 'sudo' group (common on Ubuntu).
   local grp="${SS_EDIT_GROUP:-sudo}"
 
   if ! getent group "$grp" >/dev/null 2>&1; then
-    warn "Group '$grp' not found; falling back to 'root' only."
+    warn "Group '$grp' not found; skipping group edit rights."
     return 0
   fi
 
@@ -179,14 +138,11 @@ add_edit_rights() {
   chmod 2775 /etc/shadowsocks-libev
   chmod 0664 /etc/shadowsocks-libev/config.json
 
-  info "Edit rights: /etc/shadowsocks-libev owned by root:${grp}, dir=2775, config.json=664"
-  info "To allow a user to edit, add them to group '${grp}':  usermod -aG ${grp} <username>"
+  info "Edit rights: /etc/shadowsocks-libev root:${grp}, dir=2775, config.json=664"
 }
 
 set_proc_tcp_fastopen() {
-  # Explicit requirement:
-  # echo 3 > /proc/sys/net/ipv4/tcp_fastopen
-  # Use tee to avoid shell redirection issues under sudo contexts.
+  # Explicit requirement
   echo 3 | tee /proc/sys/net/ipv4/tcp_fastopen >/dev/null || true
 }
 
@@ -200,14 +156,30 @@ configure_ufw() {
   fi
 }
 
-restart_service() {
+install_systemd_override() {
+  # This avoids "Invalid config path" issues across Ubuntu package variants.
+  mkdir -p /etc/systemd/system/shadowsocks-libev.service.d
+
+  cat >/etc/systemd/system/shadowsocks-libev.service.d/override.conf <<'EOF'
+[Service]
+# Clear any previous ExecStart from the vendor unit
+ExecStart=
+# Start ss-server with an explicit config path
+ExecStart=/usr/bin/ss-server -c /etc/shadowsocks-libev/config.json
+EOF
+
   systemctl daemon-reload
+}
+
+restart_service() {
   systemctl enable shadowsocks-libev >/dev/null 2>&1 || true
   systemctl restart shadowsocks-libev
-  sleep 0.5
+  sleep 0.7
+
   if ! systemctl is-active --quiet shadowsocks-libev; then
-    error "Service is not running. Logs:"
+    error "Service is not running. Check:"
     echo "  journalctl -u shadowsocks-libev -e --no-pager"
+    echo "  systemctl cat shadowsocks-libev --no-pager"
     exit 1
   fi
 }
@@ -223,7 +195,7 @@ make_ss_link() {
 # -------------------- main --------------------
 require_root
 
-SS_PORT="${SS_PORT:-8388}"         # override: SS_PORT=443 bash install.sh
+SS_PORT="${SS_PORT:-8388}"
 SS_NAME="${SS_NAME:-Shadowsocks}"
 
 progress "Installing packages (shadowsocks-libev, ufw, curl, certs)..."
@@ -249,6 +221,9 @@ write_config "$SS_PORT" "$SS_PASSWORD" "$SS_METHOD"
 progress "Adding edit rights on /etc/shadowsocks-libev and config.json..."
 add_edit_rights
 
+progress "Installing systemd override (explicit config path)..."
+install_systemd_override
+
 progress "Configuring UFW (22/tcp + ${SS_PORT}/tcp + ${SS_PORT}/udp)..."
 configure_ufw "$SS_PORT"
 
@@ -270,17 +245,13 @@ echo " Password    : ${SS_PASSWORD}"
 echo " Method      : ${SS_METHOD}"
 echo " Mode        : tcp_and_udp"
 echo " UFW         : allowed 22/tcp, ${SS_PORT}/tcp, ${SS_PORT}/udp"
-echo " Edit group  : ${SS_EDIT_GROUP:-sudo} (dir:2775, file:664)"
-echo
+echo " Config      : /etc/shadowsocks-libev/config.json"
 echo " ss:// link  :"
 echo " ${SS_URI}"
 echo "========================================================="
 echo
 info "Useful commands:"
 echo "  systemctl status shadowsocks-libev --no-pager"
+echo "  systemctl cat shadowsocks-libev --no-pager"
 echo "  journalctl -u shadowsocks-libev -e --no-pager"
 echo "  ufw status verbose"
-echo
-info "To let a user edit config.json without sudo:"
-echo "  sudo usermod -aG ${SS_EDIT_GROUP:-sudo} <username>"
-echo "  # then re-login (or: newgrp ${SS_EDIT_GROUP:-sudo})"
