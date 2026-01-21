@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
-# =========================
-# Shadowsocks auto-installer (Ubuntu)
-# - shadowsocks-libev
-# - UFW TCP+UDP rules (22 + SS port)
-# - Auto cipher detection
-# - No local_port/local_address in config
-# - IP forwarding + TCP/UDP tuning
-# - Progress + summary + ss:// link
-# =========================
+# ============================================================
+# Shadowsocks auto-install script (Ubuntu)
+# - Installs shadowsocks-libev
+# - Opens UFW for 22/tcp + SS port (tcp+udp)
+# - Generates 10-char password (letters+digits)
+# - Auto-detects best supported encryption method
+# - Config: DOES NOT include local_port/local_address
+# - Enables ip_forward=1
+# - TCP/UDP tuning (BBR if available, buffers, fq, etc.)
+# - Shows step-by-step progress
+# - Prints summary + ss:// link
+# ============================================================
 
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 STEP=0
 
-log()  { printf "\033[1;32m[INFO]\033[0m %s\n" "$*"; }
-warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-err()  { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
+info()  { printf "\033[1;32m[INFO]\033[0m %s\n" "$*"; }
+warn()  { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+error() { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
 
 progress() {
   STEP=$((STEP+1))
@@ -25,25 +28,18 @@ progress() {
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    err "Run as root: sudo bash install.sh"
+    error "Run as root: sudo bash install.sh"
     exit 1
   fi
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-random_password_10() {
-  # 10 chars: letters + digits
-  # Uses /dev/urandom (no external deps)
+rand_password_10() {
   tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10
 }
 
 detect_public_ip() {
-  # Best effort:
-  # 1) external (if available)
-  # 2) local source IP
   local ip=""
   if need_cmd curl; then
     ip="$(curl -4 -fsS https://api.ipify.org || true)"
@@ -55,50 +51,56 @@ detect_public_ip() {
 }
 
 pick_best_cipher() {
-  # Prefer modern AEAD ciphers; choose first supported by this ss-server build.
+  # Preference order: modern AEAD first
   local preferred=(
     "chacha20-ietf-poly1305"
     "xchacha20-ietf-poly1305"
     "aes-256-gcm"
     "aes-128-gcm"
-    "chacha20-poly1305"
     "aes-256-cfb"
     "aes-128-cfb"
   )
 
-  local help_out=""
-  help_out="$(ss-server -h 2>&1 || true)"
+  local h
+  h="$(ss-server -h 2>&1 || true)"
 
+  # Robust-ish: look for exact token boundaries in help text
   for c in "${preferred[@]}"; do
-    if echo "$help_out" | tr ',' '\n' | grep -qiE "(^|[[:space:]])${c}([[:space:]]|$)"; then
+    if echo "$h" | grep -qiE "(^|[^a-z0-9_-])${c}([^a-z0-9_-]|$)"; then
       echo "$c"
       return 0
     fi
   done
 
-  # Fallback: try to extract any cipher-looking tokens from help output
-  local fallback=""
-  fallback="$(echo "$help_out" | tr ',' '\n' | grep -E '^[a-z0-9-]+$' | head -n 1 || true)"
-  echo "${fallback:-aes-256-gcm}"
+  # Last-resort fallback
+  echo "aes-256-gcm"
 }
 
-configure_sysctl_optimizations() {
-  # TCP/UDP speed/latency tuning; safe-ish defaults for VPS.
-  # Note: Some values may be capped by kernel; that's fine.
-  cat >/etc/sysctl.d/99-shadowsocks-tuning.conf <<'EOF'
+apply_sysctl_tuning() {
+  # Try to enable BBR if kernel supports it; otherwise keep default congestion control.
+  modprobe tcp_bbr >/dev/null 2>&1 || true
+
+  local cc="cubic"
+  if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+    cc="bbr"
+  else
+    warn "BBR not available on this kernel; using default congestion control."
+  fi
+
+  cat >/etc/sysctl.d/99-shadowsocks-tuning.conf <<EOF
 # --- Shadowsocks performance tuning ---
 
-# Enable IPv4 forwarding (required by user request)
+# Enable IPv4 forwarding (requested)
 net.ipv4.ip_forward=1
 
-# BBR congestion control (good latency/throughput on modern kernels)
+# Queue discipline / congestion control
 net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_congestion_control=${cc}
 
 # TCP Fast Open
 net.ipv4.tcp_fastopen=3
 
-# Increase socket buffers (helps high BDP and UDP)
+# Bigger buffers (TCP/UDP)
 net.core.rmem_max=134217728
 net.core.wmem_max=134217728
 net.core.rmem_default=262144
@@ -113,7 +115,7 @@ net.core.netdev_max_backlog=250000
 net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=8192
 
-# Keepalive (pragmatic)
+# Keepalive
 net.ipv4.tcp_keepalive_time=600
 net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=10
@@ -123,12 +125,10 @@ net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_fin_timeout=15
 EOF
 
-  # Apply immediately
   sysctl --system >/dev/null 2>&1 || true
 }
 
-configure_limits() {
-  # Increase file limits for high concurrency
+apply_limits() {
   cat >/etc/security/limits.d/99-shadowsocks.conf <<'EOF'
 * soft nofile 1048576
 * hard nofile 1048576
@@ -137,31 +137,18 @@ root hard nofile 1048576
 EOF
 }
 
-setup_ufw_rules() {
-  local port="$1"
-
-  # Ensure UFW installed and enabled
-  apt-get install -y ufw >/dev/null
-
-  # Allow SSH (22) and Shadowsocks TCP+UDP
-  ufw allow 22/tcp >/dev/null
-  ufw allow "${port}"/tcp >/dev/null
-  ufw allow "${port}"/udp >/dev/null
-
-  # Enable ufw non-interactively if not active
-  if ! ufw status | grep -q "Status: active"; then
-    yes | ufw enable >/dev/null || true
-  fi
+install_packages() {
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null
+  apt-get install -y shadowsocks-libev ufw curl ca-certificates >/dev/null
 }
 
-write_ss_config() {
-  local port="$1"
-  local password="$2"
-  local method="$3"
+write_config() {
+  local port="$1" password="$2" method="$3"
 
   mkdir -p /etc/shadowsocks-libev
 
-  # IMPORTANT: no local_port / local_address keys included
+  # IMPORTANT: no local_port / local_address included
   cat >/etc/shadowsocks-libev/config.json <<EOF
 {
   "server": "0.0.0.0",
@@ -176,7 +163,6 @@ write_ss_config() {
 }
 EOF
 
-  # Use /etc/default/shadowsocks-libev to point daemon to this config
   cat >/etc/default/shadowsocks-libev <<'EOF'
 # Defaults for shadowsocks-libev
 START=yes
@@ -185,71 +171,77 @@ DAEMON_ARGS="-c ${CONFFILE}"
 EOF
 }
 
-install_packages() {
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y >/dev/null
-  apt-get install -y shadowsocks-libev curl ca-certificates >/dev/null
+configure_ufw() {
+  local port="$1"
+
+  ufw allow 22/tcp >/dev/null
+  ufw allow "${port}"/tcp >/dev/null
+  ufw allow "${port}"/udp >/dev/null
+
+  if ! ufw status | grep -q "Status: active"; then
+    yes | ufw enable >/dev/null || true
+  fi
 }
 
-enable_and_restart_service() {
+restart_service() {
   systemctl daemon-reload
-  systemctl enable shadowsocks-libev.service >/dev/null 2>&1 || true
-  systemctl restart shadowsocks-libev.service
+  systemctl enable shadowsocks-libev >/dev/null 2>&1 || true
+  systemctl restart shadowsocks-libev
   sleep 0.5
 
-  if ! systemctl is-active --quiet shadowsocks-libev.service; then
-    err "Service is not running. Check logs:"
+  if ! systemctl is-active --quiet shadowsocks-libev; then
+    error "Service is not running. Logs:"
     echo "  journalctl -u shadowsocks-libev -e --no-pager"
     exit 1
   fi
 }
 
-ss_link() {
+make_ss_link() {
   # ss:// base64url(method:password@host:port)#name
   local method="$1" password="$2" host="$3" port="$4" name="$5"
   local raw="${method}:${password}@${host}:${port}"
 
-  # base64 url-safe, no padding
   local b64
-  b64="$(printf '%s' "$raw" | base64 | tr -d '=' | tr '+/' '-_' | tr -d '\n')"
+  b64="$(printf '%s' "$raw" | base64 -w0 | tr -d '=' | tr '+/' '-_')"
   printf 'ss://%s#%s\n' "$b64" "$(printf '%s' "$name" | sed 's/ /%20/g')"
 }
 
-# -------- main --------
+# -------------------- main --------------------
 require_root
 
-# Defaults
-SS_PORT="${SS_PORT:-8388}"   # You can override: SS_PORT=443 bash install.sh
+SS_PORT="${SS_PORT:-8388}"         # override: SS_PORT=443 bash install.sh
 SS_NAME="${SS_NAME:-Shadowsocks}"
 
-progress "Installing required packages (shadowsocks-libev, curl, certs)..."
+progress "Installing packages (shadowsocks-libev, ufw, curl, certs)..."
 install_packages
 
-progress "Generating secure password (10 chars letters+digits)..."
-SS_PASSWORD="$(random_password_10)"
+progress "Generating password (10 chars: letters+digits)..."
+SS_PASSWORD="$(rand_password_10)"
 
-progress "Auto-detecting best supported encryption method..."
+progress "Detecting best supported encryption method..."
 SS_METHOD="$(pick_best_cipher)"
-log "Selected method: ${SS_METHOD}"
+info "Selected method: ${SS_METHOD}"
 
-progress "Applying sysctl TCP/UDP optimizations + enabling ip.forwarding=1..."
-configure_sysctl_optimizations
-configure_limits
+progress "Applying TCP/UDP tuning + enabling ip_forward=1..."
+apply_sysctl_tuning
+apply_limits
 
 progress "Writing Shadowsocks config (no local_port/local_address)..."
-write_ss_config "$SS_PORT" "$SS_PASSWORD" "$SS_METHOD"
+write_config "$SS_PORT" "$SS_PASSWORD" "$SS_METHOD"
 
-progress "Configuring UFW firewall (22/tcp + ${SS_PORT}/tcp + ${SS_PORT}/udp)..."
-setup_ufw_rules "$SS_PORT"
+progress "Configuring UFW (22/tcp + ${SS_PORT}/tcp + ${SS_PORT}/udp)..."
+configure_ufw "$SS_PORT"
 
-progress "Restarting and enabling Shadowsocks service..."
-enable_and_restart_service
+progress "Restarting & enabling Shadowsocks service..."
+restart_service
 
-progress "Generating Shadowsocks ss:// link..."
+progress "Detecting server public IP..."
 PUBLIC_IP="$(detect_public_ip)"
-SS_URI="$(ss_link "$SS_METHOD" "$SS_PASSWORD" "$PUBLIC_IP" "$SS_PORT" "$SS_NAME")"
 
-progress "Done. Printing summary..."
+progress "Generating ss:// link..."
+SS_URI="$(make_ss_link "$SS_METHOD" "$SS_PASSWORD" "$PUBLIC_IP" "$SS_PORT" "$SS_NAME")"
+
+progress "Printing summary..."
 echo
 echo "================== Shadowsocks Summary =================="
 echo " Server IP   : ${PUBLIC_IP}"
@@ -263,7 +255,7 @@ echo " ss:// link  :"
 echo " ${SS_URI}"
 echo "========================================================="
 echo
-log "Useful commands:"
+info "Useful commands:"
 echo "  systemctl status shadowsocks-libev --no-pager"
 echo "  journalctl -u shadowsocks-libev -e --no-pager"
 echo "  ufw status verbose"
