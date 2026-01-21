@@ -195,7 +195,7 @@ make_ss_link() {
 # -------------------- main --------------------
 require_root
 
-SS_PORT="${SS_PORT:-443}"
+SS_PORT="${SS_PORT:-8388}"
 SS_NAME="${SS_NAME:-Shadowsocks}"
 
 progress "Installing packages (shadowsocks-libev, ufw, curl, certs)..."
